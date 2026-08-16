@@ -23,4 +23,4 @@ After it succeeds, restart the API (`npm run dev:api`) and open `/admin` while s
 
 While the API is running, the server checks appointments every 15 minutes and automatically changes `pending`, `confirmed`, or `rescheduled` visits to `no_show` one hour after their scheduled start time. Set `NO_SHOW_CHECK_INTERVAL_MINUTES` or `NO_SHOW_GRACE_MINUTES` in `.env` to adjust the timing.
 
-For Vercel deployments, schedule `GET /api/no-show` every 15 minutes with the `Authorization: Bearer <CRON_SECRET>` header. Vercel Hobby plans only permit daily Cron jobs, so use Vercel Pro or an external scheduler for the one-hour no-show rule.
+For Vercel deployments, schedule `GET /api/no-show` every 15 minutes with the `Authorization: Bearer <CRON_SECRET>` header. This repository includes a GitHub Actions scheduler for Vercel Hobby; add `CRON_SECRET` to the repository's Actions secrets with the same value used in Vercel. Vercel Pro can alternatively run the schedule itself.

@@ -1,0 +1,21 @@
+name: Automatic no-show check
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  mark-missed-visits:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run the protected no-show check
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          curl --fail-with-body --silent --show-error \
+            --request GET \
+            --header "Authorization: Bearer ${CRON_SECRET}" \
+            https://dental-clinic-project-peach.vercel.app/api/no-show
