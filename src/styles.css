@@ -32,3 +32,45 @@
 .brand-logo { display:inline-flex; align-items:center; gap:.42rem; }.brand-logo img { width:1.9rem; height:1.9rem; flex:0 0 auto; filter:drop-shadow(0 3px 7px rgba(23,53,47,.12)); transition:transform .24s ease; }.brand-logo:hover img { transform:rotate(-8deg) scale(1.08); }.brand-logo>span:first-child { margin:0; font-size:inherit; }
 html,body,#root { max-width:100%; overflow-x:clip; }
 @media (max-width:500px) { .site-header { position:sticky; top:0; padding-inline:1rem; box-shadow:0 1px 0 var(--line); }.menu-button { display:grid; place-items:center; width:2.7rem; height:2.7rem; padding:0; border:1px solid var(--line); border-radius:6px; font-size:1.55rem; line-height:1; }.site-header nav { max-height:calc(100dvh - 68px); overflow-y:auto; padding:1rem; gap:.45rem; }.site-header nav a,.site-header nav .text-button { display:flex; align-items:center; min-height:2.8rem; padding:.5rem; }.site-header nav .button { min-height:2.8rem; margin-top:.35rem; }.hero { min-height:auto; padding-top:3.25rem; padding-bottom:4rem; }.hero h1 { font-size:clamp(3.05rem,15vw,3.65rem); }.hero>p { font-size:1rem; }.hero-actions { margin:1.65rem 0 2.6rem; }.hero-actions .button { width:100%; }.hero-note { max-width:265px; line-height:1.7; }.page { padding-top:2.8rem; padding-bottom:4.5rem; }.auth-shell { padding:1rem; min-height:calc(100dvh - 68px); }.auth-form { width:100%; }.card-form,.appointment-panel { padding:1.15rem; }.booking-aside { margin-top:2rem; }.portal-hero { gap:2rem; }.portal-art { height:290px; }.appointment-panel h2 { font-size:1.8rem; }.reschedule-actions .button { width:100%; }.admin-workspace { padding:1rem; }.admin-metric-grid article { min-height:100px; padding:.9rem; }.admin-metric-grid b { font-size:2rem; }.admin-quick-actions button { flex:1 1 100%; min-height:2.8rem; }.calendar-day,.calendar-empty { min-height:58px; }.calendar-day { padding:.25rem; }.calendar-event { display:none; }.calendar-more { font-size:.62rem; } footer { padding:2.2rem 1rem; } }
+
+/* The admin workspace uses an explicit phone layout instead of a hidden,
+   horizontally-scrolling sidebar. Every admin area remains one tap away. */
+@media (max-width:700px) {
+  .super-admin { display:block; min-width:0; }
+  .admin-sidebar { padding:.8rem 1rem 1rem; }
+  .admin-sidebar .brand { padding:0; }
+  .admin-sidebar nav {
+    display:grid;
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    gap:.42rem;
+    margin-top:.9rem;
+    overflow:visible;
+  }
+  .admin-sidebar nav button {
+    min-height:2.8rem;
+    padding:.58rem .65rem;
+    overflow-wrap:anywhere;
+    text-align:center;
+    white-space:normal;
+  }
+  .admin-workspace { min-width:0; padding:1rem; }
+  .admin-topbar { gap:.6rem; margin-bottom:1.25rem; }
+  .admin-topbar h1 { font-size:clamp(2.2rem,13vw,3.2rem); }
+  .admin-card,.calendar-shell,.admin-booking-form { padding:1rem; }
+  .admin-card h2,.calendar-toolbar h2 { font-size:1.6rem; }
+  .booking-admin-actions { justify-content:stretch; }
+  .booking-admin-actions .table-action,.admin-booking-form .button { width:100%; min-height:2.8rem; }
+  .admin-create-form .button,.settings-form .button { min-height:2.8rem; }
+  .responsive-table article { overflow-wrap:anywhere; }
+  .responsive-table article a,.responsive-table article span { white-space:normal; overflow:visible; text-overflow:clip; }
+}
+
+@media (max-width:360px) {
+  .admin-sidebar { padding-inline:.75rem; }
+  .admin-sidebar nav { gap:.32rem; }
+  .admin-sidebar nav button { padding:.5rem .35rem; font-size:.76rem; }
+  .admin-workspace { padding:.75rem; }
+  .admin-card,.calendar-shell,.admin-booking-form { padding:.8rem; }
+  .admin-metric-grid article { min-height:88px; padding:.7rem; }
+  .admin-metric-grid b { font-size:1.7rem; }
+}
