@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { supabase } from './supabase.js';
 import { AppError } from './errors.js';
 import { requireAuth, loadRole, allowRoles } from './middleware/auth.js';
+import { config } from './config.js';
+import { getEmailStatus, sendAppointmentApproved, sendAppointmentCancelled, sendPatientReply, sendTestEmail } from './email.js';
 
 const router = express.Router();
 const protectedAdmin = [requireAuth, loadRole, allowRoles('admin')];
@@ -21,6 +23,15 @@ const appointmentInput = z.object({
   status: z.enum(statusValues).optional(),
   notes: z.string().trim().max(1000).nullable().optional(),
   adminNotes: z.string().trim().max(2000).nullable().optional()
+});
+const customerAccountInput = z.object({
+  fullName: z.string().trim().min(2).max(100),
+  email: z.string().trim().email(),
+  phone: z.string().trim().min(7).max(30),
+  password: z.string().min(12).max(100),
+  dateOfBirth: z.string().date().optional().or(z.literal('')),
+  address: z.string().trim().max(300).optional().or(z.literal('')),
+  medicalNotes: z.string().trim().max(2000).optional().or(z.literal(''))
 });
 
 function pageParams(query) {
@@ -68,7 +79,7 @@ async function assertNoAppointmentConflict({ dentistId, startsAt, endsAt, exclud
     .lt('starts_at', endsAt).gt('ends_at', startsAt)
     .neq('id', excludingId || '00000000-0000-0000-0000-000000000000').limit(1);
   if (error) throw error;
-  if (data.length) throw new AppError(409, 'That dentist already has an appointment in this time slot.');
+  if ((data || []).length) throw new AppError(409, 'That dentist already has an appointment in this time slot.');
 }
 
 router.use(...protectedAdmin);
@@ -78,7 +89,7 @@ router.get('/overview', async (_req, res, next) => {
     const today = new Date().toISOString().slice(0, 10);
     const start = `${today}T00:00:00.000Z`;
     const end = `${today}T23:59:59.999Z`;
-    const [patients, accounts, dentists, todayBookings, pending, confirmed, completed, cancelled, noShow, recentBookings] = await Promise.all([
+    const [patients, accounts, dentists, todayBookings, pending, confirmed, completed, cancelled, noShow, unreadMessages, recentBookings] = await Promise.all([
       supabase.from('patients').select('*', { count: 'exact', head: true }),
       supabase.from('profiles').select('*', { count: 'exact', head: true }),
       supabase.from('dentists').select('*', { count: 'exact', head: true }).eq('is_active', true),
@@ -88,15 +99,16 @@ router.get('/overview', async (_req, res, next) => {
       supabase.from('appointments').select('*', { count: 'exact', head: true }).eq('status', 'completed'),
       supabase.from('appointments').select('*', { count: 'exact', head: true }).eq('status', 'cancelled'),
       supabase.from('appointments').select('*', { count: 'exact', head: true }).eq('status', 'no_show'),
+      supabase.from('messages').select('*', { count: 'exact', head: true }).eq('is_read', false),
       supabase.from('appointments').select('*, services(name)').order('created_at', { ascending: false }).limit(8)
     ]);
-    const failed = [patients, accounts, dentists, todayBookings, pending, confirmed, completed, cancelled, noShow, recentBookings].find((result) => result.error);
+    const failed = [patients, accounts, dentists, todayBookings, pending, confirmed, completed, cancelled, noShow, unreadMessages, recentBookings].find((result) => result.error);
     if (failed) throw failed.error;
     const recentLogs = await supabase.from('audit_logs').select('*').order('created_at', { ascending: false }).limit(8);
     if (recentLogs.error && !isMissingUpgrade(recentLogs.error)) throw recentLogs.error;
     const maps = await directoryMaps();
     const withDentists = recentBookings.data.map((item) => ({ ...item, dentist: maps.dentists.get(item.dentist_id) || null }));
-    res.json({ data: { counts: { totalPatients: patients.count, totalAccounts: accounts.count, totalDentists: dentists.count, todayAppointments: todayBookings.count, pending: pending.count, confirmed: confirmed.count, completed: completed.count, cancelled: cancelled.count, noShow: noShow.count }, recentBookings: withDentists, recentActivity: recentLogs.data || [] } });
+    res.json({ data: { counts: { totalPatients: patients.count, totalAccounts: accounts.count, totalDentists: dentists.count, todayAppointments: todayBookings.count, pending: pending.count, confirmed: confirmed.count, completed: completed.count, cancelled: cancelled.count, noShow: noShow.count, unreadMessages: unreadMessages.count }, recentBookings: withDentists, recentActivity: recentLogs.data || [] } });
   } catch (error) { next(error); }
 });
 
@@ -124,6 +136,30 @@ router.get('/accounts', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+router.post('/accounts', async (req, res, next) => {
+  try {
+    const parsed = customerAccountInput.safeParse(req.body);
+    if (!parsed.success) throw new AppError(422, 'Please check the customer details.', parsed.error.flatten());
+    const input = parsed.data;
+    const { data: created, error: createError } = await supabase.auth.signUp({
+      email: input.email,
+      password: input.password,
+      options: {
+        emailRedirectTo: config.authRedirectUrl || undefined,
+        data: { full_name: input.fullName, phone: input.phone }
+      }
+    });
+    if (createError || !created.user) throw new AppError(422, 'Unable to create the customer account. Check the details and try again.');
+    const id = created.user.id;
+    const { error: profileError } = await supabase.from('profiles').upsert({ id, full_name: input.fullName, phone: input.phone, role: 'patient', is_active: true }, { onConflict: 'id' });
+    if (profileError) throw profileError;
+    const { error: patientError } = await supabase.from('patients').upsert({ id, date_of_birth: input.dateOfBirth || null, address: input.address || null, medical_notes: input.medicalNotes || null }, { onConflict: 'id' });
+    if (patientError) throw patientError;
+    await writeAudit(req.user.id, 'created customer account', 'account', id, { email: input.email });
+    res.status(201).json({ data: { id, email: created.user.email, verificationRequired: !created.session } });
+  } catch (error) { next(error); }
+});
+
 router.patch('/accounts/:id', async (req, res, next) => {
   try {
     const parsed = z.object({ fullName: z.string().trim().min(2).max(100).optional(), phone: z.string().trim().max(30).nullable().optional(), role: z.enum(roleValues).optional(), isActive: z.boolean().optional() }).safeParse(req.body);
@@ -138,6 +174,20 @@ router.patch('/accounts/:id', async (req, res, next) => {
     if (error) throw new AppError(404, 'Account not found.');
     await writeAudit(req.user.id, 'updated account', 'account', req.params.id, changes);
     res.json({ data });
+  } catch (error) { next(error); }
+});
+
+router.delete('/accounts/:id', async (req, res, next) => {
+  try {
+    if (req.params.id === req.user.id) throw new AppError(422, 'You cannot delete your own administrator account.');
+    const { data: profile, error: profileError } = await supabase.from('profiles').select('id, role, full_name').eq('id', req.params.id).maybeSingle();
+    if (profileError) throw profileError;
+    if (!profile) throw new AppError(404, 'Customer account not found.');
+    if (profile.role !== 'patient') throw new AppError(422, 'Only customer and patient accounts can be deleted here.');
+    const { error } = await supabase.auth.admin.deleteUser(req.params.id);
+    if (error) throw new AppError(422, 'Unable to delete this customer account.');
+    await writeAudit(req.user.id, 'deleted customer account', 'account', req.params.id, { name: profile.full_name });
+    res.status(204).send();
   } catch (error) { next(error); }
 });
 
@@ -164,6 +214,20 @@ router.get('/patients', async (req, res, next) => {
     const rows = profiles.map((profile) => ({ ...profile, ...details.get(profile.id), appointmentCount: bookings.get(profile.id) || 0 }))
       .filter((row) => !search || [row.full_name, row.phone, row.address].filter(Boolean).join(' ').toLowerCase().includes(search));
     res.json({ data: rows.slice(start, start + perPage), meta: { page, perPage, total: rows.length } });
+  } catch (error) { next(error); }
+});
+
+router.get('/patients/:id', async (req, res, next) => {
+  try {
+    const [{ data: profile, error: profileError }, { data: patient, error: patientError }, { data: appointments, error: appointmentError }] = await Promise.all([
+      supabase.from('profiles').select('id, full_name, phone, role, is_active, created_at').eq('id', req.params.id).eq('role', 'patient').maybeSingle(),
+      supabase.from('patients').select('*').eq('id', req.params.id).maybeSingle(),
+      supabase.from('appointments').select('*, services(name, duration_minutes, price)').eq('patient_id', req.params.id).order('starts_at', { ascending: false })
+    ]);
+    if (profileError || patientError || appointmentError) throw profileError || patientError || appointmentError;
+    if (!profile) throw new AppError(404, 'Patient not found.');
+    const { dentists } = await directoryMaps();
+    res.json({ data: { profile: { ...profile, ...(patient || {}) }, appointments: appointments.map((item) => ({ ...item, dentist: dentists.get(item.dentist_id) || null })) } });
   } catch (error) { next(error); }
 });
 
@@ -290,11 +354,91 @@ router.patch('/bookings/:id', async (req, res, next) => {
     if (error?.code === '23P01') throw new AppError(409, 'That dentist already has an appointment in this time slot.');
     if (error) throw error;
     await writeAudit(req.user.id, 'updated booking', 'appointment', existing.id, { previousStatus: existing.status, status: data.status });
+    let email = null;
+    if (existing.status !== data.status) {
+      if (data.status === 'confirmed') email = await sendAppointmentApproved(data);
+      if (data.status === 'cancelled') email = await sendAppointmentCancelled(data);
+    }
+    res.json({ data: { ...data, email } });
+  } catch (error) { next(error); }
+});
+
+router.get('/email/status', async (_req, res) => res.json({ data: getEmailStatus() }));
+router.post('/email/test', async (_req, res) => {
+  const result = await sendTestEmail();
+  res.json({ data: { ...result, testedAt: new Date().toISOString() } });
+});
+
+router.get('/messages', async (_req, res, next) => {
+  try {
+    let { data, error } = await supabase.from('messages').select('*').is('parent_id', null).order('created_at', { ascending: false });
+    // Existing installations can continue to read the original flat inbox while
+    // the additive conversation migration is waiting to be applied.
+    if (error && isMissingUpgrade(error)) ({ data, error } = await supabase.from('messages').select('*').order('created_at', { ascending: false }));
+    if (error) throw error;
     res.json({ data });
   } catch (error) { next(error); }
 });
 
-router.get('/messages', async (_req, res, next) => { try { const { data, error } = await supabase.from('messages').select('*').order('created_at', { ascending: false }); if (error) throw error; res.json({ data }); } catch (error) { next(error); } });
+router.get('/messages/:id', async (req, res, next) => {
+  try {
+    const { data: root, error: rootError } = await supabase.from('messages').select('*').eq('id', req.params.id).maybeSingle();
+    if (rootError) throw rootError;
+    if (!root) throw new AppError(404, 'Message thread not found.');
+    const threadId = root.parent_id || root.id;
+    const { data: messages, error } = await supabase.from('messages').select('*').or(`id.eq.${threadId},parent_id.eq.${threadId}`).order('created_at');
+    if (error) throw error;
+    await supabase.from('messages').update({ is_read: true }).eq('id', threadId);
+    res.json({ data: { root: messages.find((message) => message.id === threadId) || root, messages } });
+  } catch (error) { next(error); }
+});
+
+router.patch('/messages/:id/read', async (req, res, next) => {
+  try {
+    const parsed = z.object({ isRead: z.boolean() }).safeParse(req.body);
+    if (!parsed.success) throw new AppError(422, 'A read state is required.');
+    const { data, error } = await supabase.from('messages').update({ is_read: parsed.data.isRead }).eq('id', req.params.id).select().single();
+    if (error) throw new AppError(404, 'Message not found.');
+    res.json({ data });
+  } catch (error) { next(error); }
+});
+
+router.post('/messages/:id/replies', async (req, res, next) => {
+  try {
+    const parsed = z.object({ message: z.string().trim().min(1).max(5000) }).safeParse(req.body);
+    if (!parsed.success) throw new AppError(422, 'Please enter a reply before sending.');
+    const { data: root, error: rootError } = await supabase.from('messages').select('*').eq('id', req.params.id).maybeSingle();
+    if (rootError) throw rootError;
+    if (!root) throw new AppError(404, 'Message thread not found.');
+    const threadId = root.parent_id || root.id;
+    // Registered patients may change their account email after sending their
+    // first message. Always prefer the authenticated account address, while
+    // retaining the message address for guest website inquiries.
+    let recipientEmail = root.email;
+    if (root.patient_id) {
+      const { data: account, error: accountError } = await supabase.auth.admin.getUserById(root.patient_id);
+      if (accountError) console.error('Unable to resolve customer account email:', accountError.message);
+      if (account?.user?.email) recipientEmail = account.user.email;
+    }
+    const { data, error } = await supabase.from('messages').insert({
+      parent_id: threadId,
+      patient_id: root.patient_id,
+      sender_id: req.user.id,
+      recipient_id: root.patient_id,
+      name: 'Bright Smile Dental',
+      email: recipientEmail,
+      phone: null,
+      subject: root.subject,
+      message: parsed.data.message,
+      is_read: false
+    }).select().single();
+    if (error) throw error;
+    await supabase.from('messages').update({ is_read: true }).eq('id', threadId);
+    await writeAudit(req.user.id, 'replied to customer message', 'message', threadId);
+    const email = await sendPatientReply({ ...data, name: root.name, email: recipientEmail });
+    res.status(201).json({ data: { ...data, emailSent: email.sent, emailProvider: email.provider, emailError: email.sent ? null : email.error } });
+  } catch (error) { next(error); }
+});
 router.get('/activity', async (req, res, next) => { try { const { page, perPage, start } = pageParams(req.query); const { data, error, count } = await supabase.from('audit_logs').select('*', { count: 'exact' }).order('created_at', { ascending: false }).range(start, start + perPage - 1); if (error && isMissingUpgrade(error)) return res.json({ data: [], meta: { page, perPage, total: 0, upgradeRequired: true } }); if (error) throw error; res.json({ data, meta: { page, perPage, total: count } }); } catch (error) { next(error); } });
 router.get('/settings', async (_req, res, next) => { try { const { data, error } = await supabase.from('clinic_settings').select('*').eq('id', true).single(); if (error) throw error; res.json({ data }); } catch (error) { next(error); } });
 router.patch('/settings', async (req, res, next) => { try { const parsed = z.object({ clinicName: z.string().trim().min(2).max(120).optional(), address: z.string().trim().max(300).nullable().optional(), phone: z.string().trim().max(30).nullable().optional(), email: z.string().email().nullable().optional(), timezone: z.string().trim().max(100).optional(), appointmentIntervalMinutes: z.number().int().min(5).max(240).optional(), allowOnlineBooking: z.boolean().optional(), cancellationNoticeHours: z.number().int().min(0).max(720).optional() }).safeParse(req.body); if (!parsed.success) throw new AppError(422, 'Please check clinic settings.', parsed.error.flatten()); const mapping = { clinicName: 'clinic_name', appointmentIntervalMinutes: 'appointment_interval_minutes', allowOnlineBooking: 'allow_online_booking', cancellationNoticeHours: 'cancellation_notice_hours' }; const changes = Object.fromEntries(Object.entries(parsed.data).map(([key, value]) => [mapping[key] || key, value])); const { data, error } = await supabase.from('clinic_settings').update(changes).eq('id', true).select().single(); if (error) throw error; await writeAudit(req.user.id, 'updated clinic settings', 'settings', null, changes); res.json({ data }); } catch (error) { next(error); } });

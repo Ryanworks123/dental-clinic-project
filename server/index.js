@@ -3,19 +3,21 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import morgan from 'morgan';
-import path from 'node:path';
-import { existsSync } from 'node:fs';
 import { z } from 'zod';
 import { config, missingServerConfig } from './config.js';
 import { supabase } from './supabase.js';
 import { AppError, errorHandler } from './errors.js';
 import { requireAuth, loadRole, allowRoles } from './middleware/auth.js';
-import { sendBookingNotification, sendContactNotification } from './email.js';
+import { getEmailStatus, sendAppointmentConfirmation, sendBookingNotification, sendContactNotification } from './email.js';
 import { adminRouter, assertBookableDentist, assertNoAppointmentConflict, activeSlotStatuses } from './admin.js';
 import { markMissedAppointments, startNoShowScheduler } from './no-show.js';
 
 const app = express();
-app.use(helmet());
+const isMissingMessageUpgrade = (error) => ['42703', 'PGRST205'].includes(error?.code);
+// The local static preview is intentionally plain HTTP. Keep production
+// security headers on Vercel, but do not apply them to localhost because some
+// Chromium builds reject its module bundle under the local header combination.
+if (process.env.VERCEL) app.use(helmet());
 app.use(cors({
   origin(origin, callback) {
     const vercelOrigin = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : null;
@@ -28,7 +30,7 @@ app.use(express.json({ limit: '32kb' }));
 app.use(morgan('tiny'));
 app.use('/api', rateLimit({ windowMs: 15 * 60 * 1000, limit: 200, standardHeaders: 'draft-8', legacyHeaders: false }));
 
-app.get('/api/health', (_req, res) => res.json({ ok: true, configured: missingServerConfig.length === 0, mailConfigured: Boolean(config.gmailUser && config.gmailAppPassword && config.bookingNotificationEmail), missing: missingServerConfig }));
+app.get('/api/health', (_req, res) => res.json({ ok: true, configured: missingServerConfig.length === 0, email: getEmailStatus(), missing: missingServerConfig }));
 
 app.all('/api/no-show', async (req, res, next) => {
   if (!config.cronSecret || req.headers.authorization !== `Bearer ${config.cronSecret}`) {
@@ -66,9 +68,9 @@ app.post('/api/auth/register', async (req, res, next) => {
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return next(new AppError(422, 'Please check the registration details.', parsed.error.flatten()));
   const { email, password, fullName, phone } = parsed.data;
-  const { data, error } = await supabase.auth.admin.createUser({ email, password, email_confirm: false, user_metadata: { full_name: fullName, phone } });
-  if (error) return next(new AppError(400, error.message));
-  res.status(201).json({ data: { id: data.user.id, email: data.user.email } });
+  const { data, error } = await supabase.auth.signUp({ email, password, options: { emailRedirectTo: config.authRedirectUrl || undefined, data: { full_name: fullName, phone } } });
+  if (error || !data.user) return next(new AppError(400, 'We could not create that account. Try logging in or use another email address.'));
+  res.status(201).json({ data: { id: data.user.id, email: data.user.email, verificationRequired: !data.session } });
 });
 
 app.get('/api/auth/me', requireAuth, loadRole, async (req, res, next) => {
@@ -93,6 +95,7 @@ app.post('/api/appointments', requireAuth, loadRole, async (req, res, next) => {
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return next(new AppError(422, 'Please check the appointment details.', parsed.error.flatten()));
   const input = parsed.data;
+  if (new Date(input.startsAt).getTime() <= Date.now()) return next(new AppError(422, 'Please choose a future appointment time.'));
   if (new Date(input.endsAt) <= new Date(input.startsAt)) return next(new AppError(422, 'Appointment end time must be after its start time.'));
   try {
     await assertBookableDentist(input.dentistId);
@@ -112,9 +115,8 @@ app.post('/api/appointments', requireAuth, loadRole, async (req, res, next) => {
     const { error: notificationError } = await supabase.from('notifications').insert(notifications);
     if (notificationError) return next(notificationError);
   }
-  let notificationEmailSent = false;
-  try { notificationEmailSent = await sendBookingNotification(data); } catch (mailError) { console.error('Booking email notification failed:', mailError.message); }
-  res.status(201).json({ data: { ...data, notificationEmailSent } });
+  const [patientEmail, adminEmail] = await Promise.all([sendAppointmentConfirmation(data), sendBookingNotification(data)]);
+  res.status(201).json({ data: { ...data, notificationEmailSent: adminEmail.sent, patientEmailSent: patientEmail.sent, emailProvider: 'resend' } });
 });
 
 // Patients may move their own active appointment until five hours before it starts.
@@ -160,9 +162,40 @@ app.post('/api/messages', async (req, res, next) => {
   if (!parsed.success) return next(new AppError(422, 'Please check your message details.', parsed.error.flatten()));
   const { data, error } = await supabase.from('messages').insert(parsed.data).select().single();
   if (error) return next(error);
-  let notificationEmailSent = false;
-  try { notificationEmailSent = await sendContactNotification(data); } catch (mailError) { console.error('Contact email notification failed:', mailError.message); }
-  res.status(201).json({ data: { ...data, notificationEmailSent } });
+  const notificationEmail = await sendContactNotification(data);
+  res.status(201).json({ data: { ...data, notificationEmailSent: notificationEmail.sent, emailProvider: notificationEmail.provider } });
+});
+
+app.get('/api/messages/mine', requireAuth, loadRole, allowRoles('patient'), async (req, res, next) => {
+  const { data, error } = await supabase.from('messages')
+    .select('*')
+    .eq('patient_id', req.user.id)
+    .order('created_at', { ascending: true });
+  // Keep the portal usable until the additive conversation migration is applied.
+  // The endpoint returns no thread data rather than failing the whole dashboard.
+  if (error && isMissingMessageUpgrade(error)) return res.json({ data: [] });
+  if (error) return next(error);
+  res.json({ data });
+});
+
+app.post('/api/messages/mine', requireAuth, loadRole, allowRoles('patient'), async (req, res, next) => {
+  const parsed = z.object({ subject: z.string().trim().min(2).max(150), message: z.string().trim().min(5).max(5000) }).safeParse(req.body);
+  if (!parsed.success) return next(new AppError(422, 'Please check your message before sending.', parsed.error.flatten()));
+  const { data: profile, error: profileError } = await supabase.from('profiles').select('full_name, phone').eq('id', req.user.id).single();
+  if (profileError) return next(profileError);
+  const { data, error } = await supabase.from('messages').insert({
+    patient_id: req.user.id,
+    sender_id: req.user.id,
+    name: profile.full_name,
+    email: req.user.email,
+    phone: profile.phone,
+    subject: parsed.data.subject,
+    message: parsed.data.message,
+    is_read: false
+  }).select().single();
+  if (error) return next(error);
+  const notificationEmail = await sendContactNotification(data);
+  res.status(201).json({ data: { ...data, notificationEmailSent: notificationEmail.sent, emailProvider: notificationEmail.provider } });
 });
 
 app.get('/api/notifications', requireAuth, async (req, res, next) => {
@@ -200,15 +233,13 @@ app.get('/api/admin/summary', requireAuth, loadRole, allowRoles('admin'), async 
   res.json({ data: { todayAppointments: todayAppointments.count, pendingAppointments: pendingAppointments.count, totalPatients: patients.count, activeDentists: dentists.count } });
 });
 
-// Make the local API address useful when it is opened directly. Vite remains
-// the preferred development server (http://localhost:5173), while this lets
-// `npm start` and preview tools show the built website instead of "Cannot GET /".
-const localBuildDirectory = path.resolve(process.cwd(), 'dist');
-if (!process.env.VERCEL && existsSync(localBuildDirectory)) {
-  app.use(express.static(localBuildDirectory));
+// Express owns the local API on 3001. Vite owns the browser application on
+// 5173, so direct browser visits to the API port are forwarded to the UI
+// instead of returning a blank stale build.
+if (!process.env.VERCEL) {
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api/')) return next();
-    res.sendFile(path.join(localBuildDirectory, 'index.html'));
+    res.redirect(302, `http://localhost:5173${req.originalUrl}`);
   });
 }
 

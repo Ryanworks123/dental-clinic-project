@@ -9,7 +9,7 @@ export class AppError extends Error {
 export function errorHandler(error, _request, response, _next) {
   if (['42P01', '42703', 'PGRST205'].includes(error?.code)) {
     return response.status(503).json({
-      error: { message: 'The Super Admin database upgrade is required. Run supabase/migrations/20260816_super_admin.sql in Supabase SQL Editor, then restart the API.' }
+      error: { message: 'A required clinic database migration has not been applied. Run the SQL files in supabase/migrations in order, then restart the API.' }
     });
   }
   const status = error.status || 500;
