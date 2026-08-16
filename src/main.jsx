@@ -26,7 +26,7 @@ function Header({ session, profile, onSignOut, signingOut }) {
   const [open, setOpen] = useState(false);
   return <header className="site-header"><Link className="brand brand-logo" to="/"><img src="/bright-smile-mark.svg" alt=""/>bright<span>smile</span></Link><button className="menu-button" aria-label={open ? 'Close menu' : 'Open menu'} aria-expanded={open} aria-controls="site-navigation" onClick={() => setOpen(!open)}>{open ? '×' : '☰'}</button><nav id="site-navigation" className={open ? 'open' : ''} onClick={() => setOpen(false)}>
     <NavLink to="/services">Services</NavLink><NavLink to="/about">Our clinic</NavLink><NavLink to="/contact">Contact</NavLink>
-    {session ? <><NavLink to="/portal">My visits</NavLink>{['admin', 'staff'].includes(profile?.role) && <NavLink to="/admin">Admin</NavLink>}<button className={`text-button signout-button${signingOut ? ' is-signing-out' : ''}`} onClick={onSignOut} disabled={signingOut}>{signingOut ? 'Signing out…' : 'Sign out'}</button></> : <NavLink to="/login">Log in</NavLink>}
+    {session ? <><NavLink to="/portal">My visits</NavLink>{profile?.role === 'admin' && <NavLink to="/admin">Admin</NavLink>}<button className={`text-button signout-button${signingOut ? ' is-signing-out' : ''}`} onClick={onSignOut} disabled={signingOut}>{signingOut ? 'Signing out…' : 'Sign out'}</button></> : <NavLink to="/login">Log in</NavLink>}
     <Link className="button button-small" to="/book">Book a visit</Link>
   </nav></header>;
 }
@@ -147,7 +147,7 @@ function AdminDashboard({ session }) {
     <aside className="admin-sidebar"><Link className="brand" to="/"><span>✦</span> bright<span>smile</span></Link><p>Super Admin</p><nav aria-label="Admin navigation">{adminSections.map(([id, label]) => <button key={id} className={section === id ? 'active' : ''} onClick={() => { setSection(id); setQuery(''); setStatusFilter('all'); }}>{label}</button>)}</nav></aside>
     <section className="admin-workspace">
       <header className="admin-topbar"><div><div className="eyebrow">Clinic command center</div><h1>{title}</h1></div><button className="button button-small" onClick={() => { setSection('bookings'); setBookingFormOpen(true); }}>Create booking</button></header>
-      {error && <p className="form-error" role="alert">{error}</p>}{notice && <p className="success" role="status">{notice}</p>}
+      {error && <div className="form-error admin-error" role="alert"><span>{error}</span><button className="table-action" onClick={() => load(section)}>Try again</button></div>}{notice && <p className="success" role="status">{notice}</p>}
       {loading ? <LoadingState compact label="Loading live clinic data…"/> : <>
         {section === 'dashboard' && <AdminOverview overview={overview} onNavigate={setSection}/>} 
         {section === 'bookings' && <><div className="booking-admin-actions"><button className="table-action" onClick={() => setBookingFormOpen((open) => !open)}>{bookingFormOpen ? 'Close booking form' : 'New booking'}</button></div>{bookingFormOpen && <AdminBookingForm token={token} onCreated={() => { setNotice('Booking created and sent to the appointment queue.'); setBookingFormOpen(false); load('bookings'); }} onError={setError}/>}<BookingManager rows={visibleRows} query={query} setQuery={setQuery} statusFilter={statusFilter} setStatusFilter={setStatusFilter} update={update}/></>} 
