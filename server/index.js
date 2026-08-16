@@ -12,7 +12,7 @@ import { AppError, errorHandler } from './errors.js';
 import { requireAuth, loadRole, allowRoles } from './middleware/auth.js';
 import { sendBookingNotification, sendContactNotification } from './email.js';
 import { adminRouter, assertBookableDentist, assertNoAppointmentConflict, activeSlotStatuses } from './admin.js';
-import { startNoShowScheduler } from './no-show.js';
+import { markMissedAppointments, startNoShowScheduler } from './no-show.js';
 
 const app = express();
 app.use(helmet());
@@ -29,6 +29,18 @@ app.use(morgan('tiny'));
 app.use('/api', rateLimit({ windowMs: 15 * 60 * 1000, limit: 200, standardHeaders: 'draft-8', legacyHeaders: false }));
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, configured: missingServerConfig.length === 0, mailConfigured: Boolean(config.gmailUser && config.gmailAppPassword && config.bookingNotificationEmail), missing: missingServerConfig }));
+
+app.post('/api/no-show', async (req, res, next) => {
+  if (!config.cronSecret || req.headers.authorization !== `Bearer ${config.cronSecret}`) {
+    return res.status(401).json({ error: 'Unauthorized cron request.' });
+  }
+  try {
+    const marked = await markMissedAppointments(config.noShowGraceMinutes);
+    return res.status(200).json({ marked: marked.length });
+  } catch (error) {
+    return next(error);
+  }
+});
 
 app.use('/api', (req, _res, next) => {
   if (missingServerConfig.length) return next(new AppError(503, `Server configuration is incomplete: ${missingServerConfig.join(', ')}.`));
