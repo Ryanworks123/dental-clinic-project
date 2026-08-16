@@ -1,4 +1,9 @@
-const API_URL = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? 'http://localhost:3001/api' : '/api');
+// A deployed browser must always call its own serverless API.  A local URL in
+// .env is useful for Vite development, but it must never be baked into the
+// production bundle where "localhost" means the visitor's own device.
+const API_URL = import.meta.env.DEV
+  ? (import.meta.env.VITE_API_URL || 'http://localhost:3001/api')
+  : '/api';
 
 export async function api(path, { token, ...options } = {}) {
   let response;
