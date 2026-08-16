@@ -3,6 +3,8 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import morgan from 'morgan';
+import path from 'node:path';
+import { existsSync } from 'node:fs';
 import { z } from 'zod';
 import { config, missingServerConfig } from './config.js';
 import { supabase } from './supabase.js';
@@ -185,6 +187,18 @@ app.get('/api/admin/summary', requireAuth, loadRole, allowRoles('admin'), async 
   if (failed) return next(failed.error);
   res.json({ data: { todayAppointments: todayAppointments.count, pendingAppointments: pendingAppointments.count, totalPatients: patients.count, activeDentists: dentists.count } });
 });
+
+// Make the local API address useful when it is opened directly. Vite remains
+// the preferred development server (http://localhost:5173), while this lets
+// `npm start` and preview tools show the built website instead of "Cannot GET /".
+const localBuildDirectory = path.resolve(process.cwd(), 'dist');
+if (!process.env.VERCEL && existsSync(localBuildDirectory)) {
+  app.use(express.static(localBuildDirectory));
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api/')) return next();
+    res.sendFile(path.join(localBuildDirectory, 'index.html'));
+  });
+}
 
 app.use(errorHandler);
 if (!process.env.VERCEL) {
