@@ -30,7 +30,7 @@ app.use('/api', rateLimit({ windowMs: 15 * 60 * 1000, limit: 200, standardHeader
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, configured: missingServerConfig.length === 0, mailConfigured: Boolean(config.gmailUser && config.gmailAppPassword && config.bookingNotificationEmail), missing: missingServerConfig }));
 
-app.post('/api/no-show', async (req, res, next) => {
+app.all('/api/no-show', async (req, res, next) => {
   if (!config.cronSecret || req.headers.authorization !== `Bearer ${config.cronSecret}`) {
     return res.status(401).json({ error: 'Unauthorized cron request.' });
   }
